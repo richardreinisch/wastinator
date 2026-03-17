@@ -1,5 +1,7 @@
 # 🗑 Wastinator – ESP32 WROOM-32
 
+![Wastinator](wastinator.jpg)
+
 A self-contained waste collection reminder for the **ESP32 WROOM-32**.
 No internet required. All data stored persistently in NVS flash (survives firmware uploads).
 LEDs breathe softly via LEDC PWM. Bin names and colors are fully configurable via the web UI.
