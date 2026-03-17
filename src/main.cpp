@@ -21,6 +21,16 @@ unsigned long getSystemTime() {
 
 bool timeIsSet() { return timeBase != 0; }
 
+// Timezone offset in seconds east of UTC (auto-set from browser)
+// Default 3600 = UTC+1 (Vienna winter). Browser sends actual offset on time-set.
+static int tzOffsetSec = 3600;
+
+void setTimezoneOffset(int offsetSec) {
+    tzOffsetSec = offsetSec;
+    Serial.printf("[Time] Timezone offset: %+d s (%+.1f h)\n",
+        offsetSec, offsetSec / 3600.0f);
+}
+
 struct DateTime { uint16_t year; uint8_t month, day, hour, minute; };
 
 static DateTime tsToDateTime(unsigned long ts) {
@@ -179,67 +189,109 @@ static void stopAP() {
 }
 
 // ─── POWER LED CONFIRMATION ANIMATIONS ───────────────────────────────────────
-// WiFi ON:  3x quick flash
+// Non-blocking: set override flag + duration, handlePowerLed does the animation.
+// Pattern is encoded in handlePowerLed via powerLedConfirmMode.
+enum ConfirmMode { CONFIRM_NONE=0, CONFIRM_ON, CONFIRM_OFF };
+static ConfirmMode   powerLedConfirmMode  = CONFIRM_NONE;
+static unsigned long powerLedConfirmStart = 0;
+
 static void powerLedConfirmOn() {
-    for (int rep = 0; rep < 3; rep++) {
-        for (int v = 0; v <= 255; v += 15) { ledcWrite(PWM_CH_POWER, v); delay(3); }
-        for (int v = 255; v >= 0; v -= 15) { ledcWrite(PWM_CH_POWER, v); delay(3); }
-        delay(40);
-    }
+    powerLedConfirmMode  = CONFIRM_ON;
+    powerLedConfirmStart = millis();
+    powerLedOverride      = true;
+    powerLedOverrideUntil = millis() + 900; // handled inside handlePowerLed
 }
-// WiFi OFF: 2x slow fade out
 static void powerLedConfirmOff() {
-    for (int rep = 0; rep < 2; rep++) {
-        for (int v = 0; v <= 180; v += 10) { ledcWrite(PWM_CH_POWER, v); delay(5); }
-        for (int v = 180; v >= 0; v -= 5)  { ledcWrite(PWM_CH_POWER, v); delay(6); }
-        delay(80);
-    }
+    powerLedConfirmMode  = CONFIRM_OFF;
+    powerLedConfirmStart = millis();
+    powerLedOverride      = true;
+    powerLedOverrideUntil = millis() + 900;
 }
 
 // ─── POWER LED STATE MACHINE ──────────────────────────────────────────────────
-// States (priority order):
-//   1. External override (confirmation animation running)
-//   2. Clock not set → double-blink warning pattern
-//   3. WiFi active   → slow sine fade-pulse (gentle, ~1s cycle)
-//   4. Normal        → steady on
+// Priority order:
+//   1. Confirmation animation (WiFi toggle feedback) — fully non-blocking
+//   2. Button hold progress  — brightness written by handleButton
+//   3. Clock not set         → double-blink warning
+//   4. WiFi active           → slow sine fade-pulse
+//   5. Normal                → steady on
 static void handlePowerLed() {
-    if (powerLedOverride) {
-        if (millis() >= powerLedOverrideUntil) powerLedOverride = false;
-        return;
-    }
-    if (!timeIsSet()) {
-        // Double-blink: ON-off-ON-pause
-        static uint8_t step = 0; static unsigned long stepT = 0;
-        const unsigned long dur[] = {400, 200, 400, 1000};
-        const bool          on[]  = {true, false, true, false};
-        if (millis() - stepT >= dur[step]) { stepT = millis(); step = (step+1)%4; }
-        ledcWrite(PWM_CH_POWER, on[step] ? 220 : 0);
-        return;
-    }
-    if (wifiActive) {
-        // Smooth sine fade-pulse: 0 → 220 → 0 over ~1200ms, then 300ms off
-        // Total cycle ~1500ms — calm and clearly different from alarm breathing
-        const unsigned long CYCLE = 1500UL;
-        const unsigned long ON_PHASE = 1200UL; // sine ramp portion
-        unsigned long pos = millis() % CYCLE;
+    unsigned long now = millis();
+
+    // 1. Confirmation animation
+    if (powerLedConfirmMode != CONFIRM_NONE) {
+        unsigned long t = now - powerLedConfirmStart;
         uint8_t val = 0;
-        if (pos < ON_PHASE) {
-            float phase = (float)pos / (float)ON_PHASE; // 0.0 → 1.0
-            float s = sinf(phase * M_PI);               // 0 → 1 → 0
-            val = (uint8_t)(s * s * 220.0f);            // gamma-corrected
+        if (powerLedConfirmMode == CONFIRM_ON) {
+            // 3x quick flash: 160ms rise + 140ms fall + 60ms gap = 360ms/rep
+            unsigned long cycle = t % 360UL;
+            if ((int)(t / 360) < 3) {
+                val = (cycle < 160) ? (uint8_t)(cycle * 255 / 160)
+                                    : (uint8_t)((360 - cycle) * 255 / 200);
+            } else {
+                powerLedConfirmMode = CONFIRM_NONE;
+                powerLedOverride    = false;
+            }
+        } else {
+            // 2x slow fade: 280ms rise + 320ms fall + 80ms gap = 680ms/rep
+            unsigned long cycle = t % 680UL;
+            if ((int)(t / 680) < 2) {
+                val = (cycle < 280) ? (uint8_t)(cycle * 180 / 280)
+                                    : (uint8_t)((680 - cycle) * 180 / 400);
+            } else {
+                powerLedConfirmMode = CONFIRM_NONE;
+                powerLedOverride    = false;
+            }
         }
         ledcWrite(PWM_CH_POWER, val);
         return;
     }
-    // Time set, WiFi off → steady on
+
+    // 2. Button hold progress (brightness already written by handleButton)
+    if (powerLedOverride) {
+        if (now >= powerLedOverrideUntil) powerLedOverride = false;
+        return;
+    }
+
+    // 3. Clock not set: double-blink warning
+    if (!timeIsSet()) {
+        static uint8_t step = 0; static unsigned long stepT = 0;
+        const unsigned long dur[] = {400, 200, 400, 1000};
+        const bool          on[]  = {true, false, true, false};
+        if (now - stepT >= dur[step]) { stepT = now; step = (step+1)%4; }
+        ledcWrite(PWM_CH_POWER, on[step] ? 220 : 0);
+        return;
+    }
+
+    // 4. WiFi active: smooth sine fade-pulse (~1.5s cycle)
+    if (wifiActive) {
+        const unsigned long CYCLE    = 1500UL;
+        const unsigned long ON_PHASE = 1200UL;
+        unsigned long pos = now % CYCLE;
+        uint8_t val = 0;
+        if (pos < ON_PHASE) {
+            float s = sinf((float)pos / (float)ON_PHASE * M_PI);
+            val = (uint8_t)(s * s * 220.0f);
+        }
+        ledcWrite(PWM_CH_POWER, val);
+        return;
+    }
+
+    // 5. Normal: steady on
     ledcWrite(PWM_CH_POWER, 200);
 }
 
 // ─── ALARM: CHECK TOMORROW'S PICKUPS ─────────────────────────────────────────
+// Timezone offset in seconds — adjust TZ_OFFSET_SEC to your local UTC offset.
+// Vienna: UTC+1 in winter = 3600, UTC+2 in summer (CEST) = 7200
+// The browser sends UTC timestamps; we add the offset so day/hour is local time.
 static uint8_t checkTomorrow() {
     unsigned long ts = getSystemTime();
     if (!ts) return 0;
-    DateTime dt = tsToDateTime(ts);
+
+    unsigned long localTs = ts + (unsigned long)tzOffsetSec;
+    DateTime dt = tsToDateTime(localTs);
+
     uint8_t nd = dt.day, nm = dt.month; uint16_t ny = dt.year;
     static const uint8_t dim[] = {31,28,31,30,31,30,31,31,30,31,30,31};
     uint8_t maxd = dim[nm-1];
@@ -256,7 +308,9 @@ static uint8_t checkTomorrow() {
     return mask;
 }
 
-// ─── BREATHING LED UPDATE ─────────────────────────────────────────────────────
+// ─── BREATHING LED UPDATE — always called from loop ──────────────────────────
+// Separated from handleAlarm() so LEDs keep running regardless of WiFi state,
+// button holds, or blocking preview sequences.
 static void handleBreathingLeds() {
     unsigned long now = millis();
     unsigned long dt  = now - lastBreathUpdate;
@@ -279,14 +333,20 @@ static void handleBreathingLeds() {
 // ─── ALARM HANDLER ────────────────────────────────────────────────────────────
 static void handleAlarm() {
     if (!timeIsSet()) return;
-    DateTime dt = tsToDateTime(getSystemTime());
+
+    DateTime dt = tsToDateTime(getSystemTime() + (unsigned long)tzOffsetSec);
     uint8_t mask = (dt.hour >= NOTIFY_HOUR) ? checkTomorrow() : 0;
 
     if (mask && (!alarmActive || mask != alarmMask)) {
         alarmActive = true; alarmMask = mask;
         acknowledged = false; lastRepeat = millis();
-        Serial.printf("[Alarm] Tomorrow: bins 0x%02X\n", mask);
+        Serial.printf("[Alarm] Active — tomorrow bins 0x%02X  local: %02d:%02d\n",
+            mask, dt.hour, dt.minute);
         if (cfg.buzzerEnabled) { buzz(); delay(120); buzz(); }
+        else Serial.println("[Alarm] (buzzer disabled — enable in web UI)");
+    } else if (!mask && alarmActive) {
+        Serial.println("[Alarm] Cleared.");
+        alarmActive = false; alarmMask = 0; acknowledged = false;
     } else if (!mask) {
         alarmActive = false; alarmMask = 0; acknowledged = false;
     }
@@ -296,7 +356,6 @@ static void handleAlarm() {
             if (cfg.buzzerEnabled) buzz();
         }
     }
-    handleBreathingLeds();
 }
 
 // ─── NEXT PICKUP FINDER ───────────────────────────────────────────────────────
@@ -344,45 +403,130 @@ static NextPickup findNextPickup() {
     return result;
 }
 
-// ─── BLINK-COUNT PREVIEW ──────────────────────────────────────────────────────
-// Blink the bin LED N times with a short on/off pulse, then pause.
-// e.g. day=12, month=3 → 12 blinks, long pause, 3 blinks
-static void blinkCount(uint8_t binCh, uint8_t count, int onMs = 120, int offMs = 120) {
-    if (count == 0) return;
-    for (uint8_t i = 0; i < count; i++) {
-        ledcWrite(binCh, 220);
-        delay(onMs);
-        ledcWrite(binCh, 0);
-        if (i < count - 1) delay(offMs);
+// ─── BLINK-COUNT PREVIEW — non-blocking state machine ────────────────────────
+// States: idle → intro → day blinks → pause → month blinks → done
+// Driven by handlePreview() called every loop iteration.
+enum PreviewState {
+    PV_IDLE=0, PV_INTRO_ON, PV_INTRO_OFF,
+    PV_DAY_ON, PV_DAY_OFF, PV_PAUSE,
+    PV_MONTH_ON, PV_MONTH_OFF, PV_DONE
+};
+
+static PreviewState  pvState    = PV_IDLE;
+static unsigned long pvStateAt  = 0;   // millis() when current state started
+static uint8_t       pvBinCh    = 0;
+static uint8_t       pvDay      = 0;
+static uint8_t       pvMonth    = 0;
+static uint8_t       pvCount    = 0;   // blinks remaining in current group
+static bool          pvAllBins  = false; // true = flash all bins (no pickup found)
+
+// Timing constants (ms)
+#define PV_INTRO_ON_MS   400
+#define PV_INTRO_OFF_MS  500
+#define PV_BLINK_ON_MS   130
+#define PV_BLINK_OFF_MS  130
+#define PV_PAUSE_MS      700
+
+static void startNextPickupPreview() {
+    NextPickup np = findNextPickup();
+    if (np.binIndex < 0) {
+        Serial.println("[Preview] No upcoming pickups found.");
+        // Flash all bins briefly
+        for (int i = 0; i < NUM_BINS; i++) ledcWrite(BIN_PWM_CH[i], 180);
+        pvAllBins  = true;
+        pvState    = PV_DONE;
+        pvStateAt  = millis();
+        return;
+    }
+    Serial.printf("[Preview] Next pickup: bin %d  %02d/%02d\n",
+        np.binIndex, np.day, np.month);
+    pvBinCh   = BIN_PWM_CH[np.binIndex];
+    pvDay     = np.day;
+    pvMonth   = np.month;
+    pvCount   = pvDay;
+    pvAllBins = false;
+    pvState   = PV_INTRO_ON;
+    pvStateAt = millis();
+    ledcWrite(pvBinCh, 220);
+}
+
+// Called every loop() — advances the state machine, never blocks
+static void handlePreview() {
+    if (pvState == PV_IDLE) return;
+    unsigned long elapsed = millis() - pvStateAt;
+
+    switch (pvState) {
+        case PV_INTRO_ON:
+            if (elapsed >= PV_INTRO_ON_MS) {
+                ledcWrite(pvBinCh, 0);
+                pvState = PV_INTRO_OFF; pvStateAt = millis();
+            }
+            break;
+        case PV_INTRO_OFF:
+            if (elapsed >= PV_INTRO_OFF_MS) {
+                ledcWrite(pvBinCh, 220);
+                pvState = PV_DAY_ON; pvStateAt = millis();
+            }
+            break;
+        case PV_DAY_ON:
+            if (elapsed >= PV_BLINK_ON_MS) {
+                ledcWrite(pvBinCh, 0);
+                pvCount--;
+                pvState = PV_DAY_OFF; pvStateAt = millis();
+            }
+            break;
+        case PV_DAY_OFF:
+            if (elapsed >= PV_BLINK_OFF_MS) {
+                if (pvCount > 0) {
+                    ledcWrite(pvBinCh, 220);
+                    pvState = PV_DAY_ON;
+                } else {
+                    pvState = PV_PAUSE;  // day done, wait before month
+                    pvCount = pvMonth;
+                }
+                pvStateAt = millis();
+            }
+            break;
+        case PV_PAUSE:
+            if (elapsed >= PV_PAUSE_MS) {
+                ledcWrite(pvBinCh, 220);
+                pvState = PV_MONTH_ON; pvStateAt = millis();
+            }
+            break;
+        case PV_MONTH_ON:
+            if (elapsed >= PV_BLINK_ON_MS) {
+                ledcWrite(pvBinCh, 0);
+                pvCount--;
+                pvState = PV_MONTH_OFF; pvStateAt = millis();
+            }
+            break;
+        case PV_MONTH_OFF:
+            if (elapsed >= PV_BLINK_OFF_MS) {
+                if (pvCount > 0) {
+                    ledcWrite(pvBinCh, 220);
+                    pvState = PV_MONTH_ON;
+                } else {
+                    pvState = PV_DONE;
+                }
+                pvStateAt = millis();
+            }
+            break;
+        case PV_DONE:
+            if (elapsed >= 300) {
+                if (pvAllBins)
+                    for (int i = 0; i < NUM_BINS; i++) ledcWrite(BIN_PWM_CH[i], 0);
+                pvState   = PV_IDLE;
+                pvAllBins = false;
+            }
+            break;
+        default: break;
     }
 }
 
+// Trigger the preview (called on short button press)
 static void showNextPickupPreview() {
-    NextPickup np = findNextPickup();
-    if (np.binIndex < 0) {
-        // No upcoming pickups — briefly flash all bins once to signal "nothing found"
-        for (int i = 0; i < NUM_BINS; i++) ledcWrite(BIN_PWM_CH[i], 180);
-        delay(300);
-        for (int i = 0; i < NUM_BINS; i++) ledcWrite(BIN_PWM_CH[i], 0);
-        Serial.println("[Preview] No upcoming pickups found.");
-        return;
-    }
-
-    uint8_t ch = BIN_PWM_CH[np.binIndex];
-    Serial.printf("[Preview] Next pickup: bin %d  %02d/%02d\n",
-        np.binIndex, np.day, np.month);
-
-    // Brief intro flash so user knows which bin
-    ledcWrite(ch, 220); delay(400); ledcWrite(ch, 0); delay(500);
-
-    // Day blinks
-    blinkCount(ch, np.day,  130, 130);
-    delay(700);  // long pause between day and month
-
-    // Month blinks
-    blinkCount(ch, np.month, 130, 130);
-
-    delay(200);
+    if (pvState != PV_IDLE) return; // already running
+    startNextPickupPreview();
 }
 
 // ─── UNIFIED BUTTON HANDLER ───────────────────────────────────────────────────
@@ -424,7 +568,7 @@ static void handleButton() {
             static bool midFlash = false;
             if (held >= WIFI_HOLD_MS/2 && !midFlash) {
                 midFlash = true;
-                ledcWrite(PWM_CH_POWER, 255); delay(40);
+                ledcWrite(PWM_CH_POWER, 255); // brief peak — no blocking delay
             }
             if (held < WIFI_HOLD_MS/2) midFlash = false;
             uint8_t brightness = (uint8_t)((held * 240UL) / WIFI_HOLD_MS);
@@ -481,6 +625,9 @@ void setup() {
 void loop() {
     handleButton();
     handleAlarm();
+    handlePreview();         // non-blocking blink-code state machine
+    // Only run breathing LEDs when preview is idle (they share the bin LED pins)
+    if (pvState == PV_IDLE) handleBreathingLeds();
     handlePowerLed();
     if (wifiActive) webserver_handle();
     delay(8);

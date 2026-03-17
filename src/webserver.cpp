@@ -378,9 +378,13 @@ async function saveAll(showMsg=true){
 async function setTime(){
   const val=document.getElementById('dtInput').value;
   if(!val) return;
-  const ts=Math.floor(new Date(val).getTime()/1000);
+  // Send both UTC timestamp AND the browser's UTC offset in seconds
+  // so the firmware can convert to local time correctly without manual TZ config
+  const d=new Date(val);
+  const ts=Math.floor(d.getTime()/1000);
+  const tzOffset=-d.getTimezoneOffset()*60; // JS gives minutes west, we want seconds east
   try{
-    await fetch('/api/settime?ts='+ts);
+    await fetch('/api/settime?ts='+ts+'&tz='+tzOffset);
     showToast('🕐 Time set!','#3b82f6');
     updateClock();
   }catch(e){showToast('⚠️ Error','#ef4444')}
@@ -565,13 +569,17 @@ static void handlePostConfig() {
 }
 
 static void handleSetTime() {
-    if (server.hasArg("ts")) {
-        extern void setSystemTime(unsigned long);
-        setSystemTime(server.arg("ts").toInt());
-        server.send(200, "application/json", "{\"ok\":true}");
-    } else {
+    if (!server.hasArg("ts")) {
         server.send(400, "text/plain", "Missing ts");
+        return;
     }
+    extern void setSystemTime(unsigned long);
+    extern void setTimezoneOffset(int);
+    setSystemTime(server.arg("ts").toInt());
+    if (server.hasArg("tz")) {
+        setTimezoneOffset(server.arg("tz").toInt());
+    }
+    server.send(200, "application/json", "{\"ok\":true}");
 }
 
 static void handleGetTime() {
