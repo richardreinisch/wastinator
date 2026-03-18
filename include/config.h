@@ -37,7 +37,7 @@
 // ─── STORAGE (NVS via Preferences) ───────────────────────────────────────────
 // NVS lives in its own flash partition — survives firmware uploads.
 // Bump EEPROM_MAGIC whenever AppConfig struct layout changes to force a reset.
-#define EEPROM_MAGIC        0xB2
+#define EEPROM_MAGIC        0xB3
 
 // ─── BIN COUNT ────────────────────────────────────────────────────────────────
 #define NUM_BINS            4
@@ -77,6 +77,7 @@ struct BinConfig {
 struct AppConfig {
     bool      buzzerEnabled;
     bool      repeatNotify;
+    bool      powerSave;     // dim status LED to a brief pulse every 10s
     BinConfig bins[NUM_BINS];
 };
 

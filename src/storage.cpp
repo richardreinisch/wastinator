@@ -17,6 +17,7 @@ void storage_init() {
 void storage_reset(AppConfig& cfg) {
     cfg.buzzerEnabled = false;
     cfg.repeatNotify  = false;
+    cfg.powerSave     = false;
     for (int b = 0; b < NUM_BINS; b++) {
         strncpy(cfg.bins[b].name, DEFAULT_BIN_NAMES[b], sizeof(cfg.bins[b].name) - 1);
         cfg.bins[b].name[sizeof(cfg.bins[b].name) - 1] = '\0';

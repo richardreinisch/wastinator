@@ -277,7 +277,23 @@ static void handlePowerLed() {
         return;
     }
 
-    // 5. Normal: steady on
+    // 5. Power-save: brief gentle pulse every 10 seconds, otherwise off
+    if (cfg.powerSave) {
+        // 10s cycle: LED off for 9700ms, then a soft 300ms sine blip
+        const unsigned long PS_CYCLE  = 10000UL;
+        const unsigned long PS_PULSE  =   300UL;
+        unsigned long pos = now % PS_CYCLE;
+        uint8_t val = 0;
+        if (pos < PS_PULSE) {
+            float phase = (float)pos / (float)PS_PULSE;
+            float s = sinf(phase * M_PI);
+            val = (uint8_t)(s * s * 80.0f);   // max brightness 80/255 — very subtle
+        }
+        ledcWrite(PWM_CH_POWER, val);
+        return;
+    }
+
+    // 6. Normal: steady on
     ledcWrite(PWM_CH_POWER, 200);
 }
 

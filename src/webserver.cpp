@@ -157,6 +157,7 @@ footer{text-align:center;color:var(--muted);font-size:.72rem;margin-top:16px}
   <div class="row">
     <label class="tog"><input type="checkbox" class="toggle" id="chkBuzzer"> Buzzer alerts</label>
     <label class="tog"><input type="checkbox" class="toggle" id="chkRepeat"> Repeat notifications</label>
+    <label class="tog"><input type="checkbox" class="toggle" id="chkPowerSave"> Power save (status LED)</label>
     <button class="btn btn-green btn-sm" style="margin-left:auto" onclick="saveSettings()">💾 Save settings</button>
   </div>
 </div>
@@ -200,6 +201,7 @@ const COLORS=[
 let state={
   buzzerEnabled:false,
   repeatNotify:false,
+  powerSave:false,
   bins:[
     {name:'General Waste',         colorIndex:0, pickups:[]},
     {name:'Paper',                 colorIndex:5, pickups:[]},
@@ -217,6 +219,7 @@ async function load(){
   }catch(e){console.warn('Offline/demo mode')}
   document.getElementById('chkBuzzer').checked=!!state.buzzerEnabled;
   document.getElementById('chkRepeat').checked=!!state.repeatNotify;
+  document.getElementById('chkPowerSave').checked=!!state.powerSave;
   const n=new Date();
   n.setMinutes(n.getMinutes()-n.getTimezoneOffset());
   document.getElementById('dtInput').value=n.toISOString().slice(0,16);
@@ -355,6 +358,7 @@ function delPickup(bi,idx){
 function saveSettings(){
   state.buzzerEnabled=document.getElementById('chkBuzzer').checked;
   state.repeatNotify=document.getElementById('chkRepeat').checked;
+  state.powerSave=document.getElementById('chkPowerSave').checked;
   saveAll();
 }
 
@@ -446,6 +450,7 @@ static String buildConfigJson() {
     String j = "{";
     j += "\"buzzerEnabled\":" + String(_cfg->buzzerEnabled ? "true" : "false") + ",";
     j += "\"repeatNotify\":"  + String(_cfg->repeatNotify  ? "true" : "false") + ",";
+    j += "\"powerSave\":"     + String(_cfg->powerSave     ? "true" : "false") + ",";
     j += "\"bins\":[";
     for (int b = 0; b < NUM_BINS; b++) {
         if (b) j += ",";
@@ -498,6 +503,10 @@ static void handlePostConfig() {
     // repeatNotify
     idx = body.indexOf("\"repeatNotify\":");
     if (idx >= 0) _cfg->repeatNotify = body.substring(idx+15, idx+21).startsWith("true");
+
+    // powerSave
+    idx = body.indexOf("\"powerSave\":");
+    if (idx >= 0) _cfg->powerSave = body.substring(idx+12, idx+18).startsWith("true");
 
     // bins array
     idx = body.indexOf("\"bins\":[");
